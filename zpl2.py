@@ -2,6 +2,8 @@
 # Copyright (C) 2016 SYLEAM (<http://www.syleam.fr>)
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
+from PIL import Image
+
 # Constants for the printer configuration management
 CONF_RELOAD_FACTORY = 'F'
 CONF_RELOAD_NETWORK_FACTORY = 'N'
@@ -422,6 +424,94 @@ class Zpl2(object):
         command = '{origin}{data}{stop}'.format(
             origin=self._field_origin(right, down),
             data='^GC' + self._generate_arguments(arguments, graphic_format),
+            stop=self._field_data_stop(),
+        )
+        self._write_command(command)
+
+    def graphic_image(self, right, down, image_data):
+        """ Print the image_data from the file handle """
+
+        def get_byte_val(bits, word_len):
+            if len(bits) == 0:
+                return 0
+            else:
+                byte_value = bits[0] << word_len - 1
+                return byte_value + get_byte_val(bits[1:], word_len - 1)
+
+        def round_up(value, multiple):
+            result = value
+            rest = value % multiple
+            if rest:
+                result += multiple - rest
+            return result
+
+        def encode_ascii(pil_image):
+            data = pil_image.load()
+            sizex, sizey = pil_image.size
+            # construct an array y - x
+            # the first row of the array, is the first line of bits in the
+            # image
+            pixels = [[0 for x in range(0, sizex)] for y in range(0, sizey)]
+            for xpos in range(0, sizex):
+                for ypos in range(0, sizey):
+                    input_value = data[xpos, ypos]
+                    bit_value = input_value & 1 ^ 1
+                    pixels[ypos][xpos] = bit_value
+
+            ret = []
+            for pixel_row in pixels:
+                pixel_string = ''
+                for xpos in range(0, len(pixel_row), 4):
+                    bits = pixel_row[xpos:xpos + 4]
+                    byte_value = get_byte_val(bits, 4)
+                    pixel_string += '%X' % byte_value
+                ret.append(pixel_string)
+            return ret
+
+        img = Image.open(image_data)
+
+        img_size_x, img_size_y = img.size
+
+        # increase x size to the nearest multiple of 8 pixels
+        # The length of the first row of pixels is set in bytes and must be
+        # a multiple of 8 bytes.
+        # The zebra tools also round the x size of images to the nearest of
+        # 8 pixels.
+        img_size_x_new = round_up(img.size[0], 8)
+        img_size_y_new = img_size_y
+
+        if img_size_x_new != img_size_x:
+            new_img = Image.new('1', (img_size_x_new, img_size_y_new),
+                                color=255)
+            new_img.paste(img, (0, 0))
+            ascii_data = encode_ascii(new_img)
+        else:
+            ascii_data = encode_ascii(img)
+
+        # Total of bytes is the total number of pixels in the image
+        # transferred to the printer divided by 8
+        total_bytes = img_size_x_new * img_size_y / 8
+
+        # The bytes per row, is the X size of the image, divided by 8
+        bytes_per_row = img_size_x_new / 8
+
+        # Check our conversion
+        assert bytes_per_row == len(ascii_data[0]) / 2
+        assert img_size_y_new == len(ascii_data)
+
+        graphic_image_command = (
+            '^GFA,%(total_bytes)s,%(total_bytes)s,%(bytes_per_row)s,'
+            '%(ascii_data)s' % {
+                'total_bytes': total_bytes,
+                'bytes_per_row': bytes_per_row,
+                'ascii_data': ''.join(ascii_data),
+            }
+        )
+
+        # Generate the ZPL II command
+        command = '{origin}{data}{stop}'.format(
+            origin=self._field_origin(right, down),
+            data=graphic_image_command,
             stop=self._field_data_stop(),
         )
         self._write_command(command)
