@@ -428,15 +428,13 @@ class Zpl2(object):
         )
         self._write_command(command)
 
-    def graphic_image(self, right, down, image_data):
-        """ Print the image_data from the file handle """
-
-        def get_byte_val(bits, word_len):
-            if len(bits) == 0:
-                return 0
-            else:
-                byte_value = bits[0] << word_len - 1
-                return byte_value + get_byte_val(bits[1:], word_len - 1)
+    @staticmethod
+    def encode_grf_ascii(pil_image):
+        """Converts a PIL image to a .GRF file encoded in ascii for use
+        with zebra printers.
+        @:return array of strings, each string is a pixel row, containing
+        4 pixel per ascii character
+        """
 
         def round_up(value, multiple):
             result = value
@@ -445,59 +443,64 @@ class Zpl2(object):
                 result += multiple - rest
             return result
 
-        def encode_ascii(pil_image):
-            data = pil_image.load()
-            sizex, sizey = pil_image.size
-            # construct an array y - x
-            # the first row of the array, is the first line of bits in the
-            # image
-            pixels = [[0 for x in range(0, sizex)] for y in range(0, sizey)]
-            for xpos in range(0, sizex):
-                for ypos in range(0, sizey):
-                    input_value = data[xpos, ypos]
-                    bit_value = input_value & 1 ^ 1
-                    pixels[ypos][xpos] = bit_value
+        def get_byte_val(bits, word_len):
+            if len(bits) == 0:
+                return 0
+            else:
+                byte_value = bits[0] << word_len - 1
+                return byte_value + get_byte_val(bits[1:], word_len - 1)
 
-            ret = []
-            for pixel_row in pixels:
-                pixel_string = ''
-                for xpos in range(0, len(pixel_row), 4):
-                    bits = pixel_row[xpos:xpos + 4]
-                    byte_value = get_byte_val(bits, 4)
-                    pixel_string += '%X' % byte_value
-                ret.append(pixel_string)
-            return ret
+        # make sure we have a monochrome image, and load it.
+        data = pil_image.convert("1").load()
+        sizex, sizey = pil_image.size
 
-        img = Image.open(image_data)
-
-        img_size_x, img_size_y = img.size
-
-        # increase x size to the nearest multiple of 8 pixels
+        # increase row size to the nearest multiple of 8 pixels
         # The length of the first row of pixels is set in bytes and must be
         # a multiple of 8 bytes.
         # The zebra tools also round the x size of images to the nearest of
         # 8 pixels.
-        img_size_x_new = round_up(img.size[0], 8)
-        img_size_y_new = img_size_y
+        row_size = round_up(sizex, 8)
+        # construct an array y - x
+        # the first row of the array, is the first line of pixels in the
+        # image
+        # Fill all values with white
+        pixels = [[1 for x in range(0, row_size)] for y in range(0, sizey)]
+        for xpos in range(0, sizex):
+            for ypos in range(0, sizey):
+                input_value = data[xpos, ypos]
+                # PIL: pixel value 0 = white , pixel value 255 = black
+                # GRF: 1=white, 0=black
+                bit_value = input_value >> 7 ^ 1
+                pixels[ypos][xpos] = bit_value
 
-        if img_size_x_new != img_size_x:
-            new_img = Image.new('1', (img_size_x_new, img_size_y_new),
-                                color=255)
-            new_img.paste(img, (0, 0))
-            ascii_data = encode_ascii(new_img)
-        else:
-            ascii_data = encode_ascii(img)
+        ret = []
+        for pixel_row in pixels:
+            pixel_string = ''
+            for xpos in range(0, len(pixel_row), 4):
+                bits = pixel_row[xpos:xpos + 4]
+                byte_value = get_byte_val(bits, 4)
+                pixel_string += '%X' % byte_value
+            ret.append(pixel_string)
+
+        return ret
+
+    def graphic_image(self, right, down, pil_image):
+        """ Print the image_data from the file handle """
+
+        img_size_y = pil_image.size[1]
+        ascii_data = self.encode_grf_ascii(pil_image)
+
+        # The bytes per row, is the number of chars in the first row, divided
+        # by 8
+        # Should be equal to the X size of the image, divided by 8 and
+        # rounded up
+        bytes_per_row = len(ascii_data[0])/2
 
         # Total of bytes is the total number of pixels in the image
         # transferred to the printer divided by 8
-        total_bytes = img_size_x_new * img_size_y / 8
-
-        # The bytes per row, is the X size of the image, divided by 8
-        bytes_per_row = img_size_x_new / 8
-
-        # Check our conversion
-        assert bytes_per_row == len(ascii_data[0]) / 2
-        assert img_size_y_new == len(ascii_data)
+        # Is equal to the number of bytes of the first row times the
+        # number of rows
+        total_bytes = bytes_per_row * img_size_y
 
         graphic_image_command = (
             '^GFA,%(total_bytes)s,%(total_bytes)s,%(bytes_per_row)s,'
